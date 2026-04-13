@@ -376,6 +376,56 @@ def draw_eye_tracking(
     return output
 
 
+def auto_detect_eye(frame: np.ndarray) -> tuple[int, int]:
+    """
+    Auto-detect eye by finding dark regions in center of frame.
+    Returns (cx, cy).
+    """
+    h, w = frame.shape[:2]
+    
+    center_x, center_y = w // 2, h // 2
+    
+    search_w, search_h = w // 3, h // 3
+    search_x = center_x - search_w // 2
+    search_y = center_y - search_h // 2
+    
+    search_region = (search_x, search_y, search_w, search_h)
+    
+    dark_pos = find_dark_region(frame, search_region)
+    
+    if dark_pos:
+        return dark_pos
+    
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    
+    _, thresh = cv2.threshold(enhanced, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    kernel = np.ones((5, 5), np.uint8)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    dark_regions = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if 100 < area < (w * h * 0.1):
+            M = cv2.moments(cnt)
+            if M["m00"] > 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                dist = np.sqrt((cx - center_x)**2 + (cy - center_y)**2)
+                if dist < w * 0.3:
+                    dark_regions.append((cx, cy, area, dist))
+    
+    if dark_regions:
+        dark_regions.sort(key=lambda r: (r[3], -r[2]))
+        return dark_regions[0][0], dark_regions[0][1]
+    
+    return center_x, center_y
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Track eye with color segmentation (Step 2).")
     parser.add_argument("--input", "-i", type=Path, required=True, help="Input video path.")
@@ -386,6 +436,7 @@ def main() -> int:
     parser.add_argument("--kmeans-k", type=int, default=5, help="Number of K-means clusters.")
     parser.add_argument("--save-center", type=Path, default=None, help="Save center to file.")
     parser.add_argument("--load-center", type=Path, default=None, help="Load center from file.")
+    parser.add_argument("--auto-detect", action="store_true", help="Auto-detect eye on first frame.")
     args = parser.parse_args()
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -430,6 +481,12 @@ def main() -> int:
         roi_x, roi_y = cx - 50, cy - 50
         roi_w, roi_h = 100, 100
         print(f"Loaded center: ({cx}, {cy})")
+    elif args.auto_detect:
+        print("Auto-detecting eye on first frame...")
+        cx, cy = auto_detect_eye(first_frame)
+        roi_x, roi_y = cx - 50, cy - 50
+        roi_w, roi_h = 100, 100
+        print(f"Auto-detected center: ({cx}, {cy})")
     else:
         print("Select eye region by drawing a rectangle...")
         region = select_eye_region(first_frame)
