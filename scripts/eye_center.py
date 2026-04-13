@@ -281,10 +281,10 @@ def smooth_ellipses(ellipses: list, radius: int = 5) -> list:
 
 def draw_eye_ellipse(
     frame: np.ndarray,
-    cx: int,
-    cy: int,
-    a: int,
-    b: int,
+    cx: float,
+    cy: float,
+    a: float,
+    b: float,
     angle: float,
     color: tuple = (0, 255, 0),
     thickness: int = 2,
@@ -295,6 +295,9 @@ def draw_eye_ellipse(
     
     cx = int(cx)
     cy = int(cy)
+    a = int(a)
+    b = int(b)
+    r = int(max(a, b))
     
     if 0 <= cx < w and 0 <= cy < h:
         box = ((cx, cy), (a * 2, b * 2), angle)
@@ -361,8 +364,11 @@ def main() -> int:
 
     frame_center = (w // 2, h // 2)
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    fourcc = cv2.VideoWriter_fourcc(*"MJPG")
     writer = cv2.VideoWriter(str(args.output), fourcc, fps, (w, h))
+    if not writer.isOpened():
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(args.output), fourcc, fps, (w, h))
     if not writer.isOpened():
         print(f"Failed to open writer: {args.output}", file=sys.stderr)
         cap.release()
@@ -449,8 +455,11 @@ def main() -> int:
         print("Rewriting with smoothed ellipses...")
         
         cap = cv2.VideoCapture(str(args.input))
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fourcc = cv2.VideoWriter_fourcc(*"MJPG")
         writer = cv2.VideoWriter(str(args.output), fourcc, fps, (w, h))
+        if not writer.isOpened():
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(str(args.output), fourcc, fps, (w, h))
         
         for frame_idx in range(min(max_frames, len(smoothed))):
             ok, frame = cap.read()
