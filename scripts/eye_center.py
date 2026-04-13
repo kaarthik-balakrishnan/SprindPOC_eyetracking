@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Step 2: Eye Tracking with Circle Overlay
+Step 2: Eye Tracking with Ellipse Overlay
 
 - Converts to grayscale and inverts to make pupil bright
-- Uses center-of-image heuristic to locate eye
+- Uses ellipse fitting to detect iris (handles sideways gazes)
 - Tracks using multi-point optical flow
-- Draws circle on original video
+- Draws ellipse on original video
 
 Usage:
   python scripts/eye_center.py --input outputs/stabilized.mp4 \\
@@ -40,7 +40,6 @@ def preprocess_for_eye_detection(frame: np.ndarray) -> tuple[np.ndarray, np.ndar
     1. Convert to grayscale
     2. Apply CLAHE for contrast enhancement
     3. Invert colors (eye becomes bright white)
-    Returns both grayscale and inverted image.
     """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     
@@ -52,61 +51,143 @@ def preprocess_for_eye_detection(frame: np.ndarray) -> tuple[np.ndarray, np.ndar
     return gray, inverted
 
 
-def detect_eye_center(inverted: np.ndarray, frame_center: tuple[int, int]) -> tuple[int, int, int]:
+def detect_iris_ellipse(inverted: np.ndarray, frame_center: tuple[int, int], 
+                       min_axis: int = 8, max_axis: int = 60) -> tuple[int, int, int, int, float] | None:
     """
-    Detect eye center using:
-    1. Threshold to find bright regions (eye appears bright after inversion)
-    2. Find largest bright blob
-    3. If no good blob, fall back to center of image
-    Returns (x, y, radius).
+    Detect iris using ellipse fitting.
+    Returns (cx, cy, a, b, angle) or None if no ellipse found.
     """
     h, w = inverted.shape
     
     _, thresh = cv2.threshold(inverted, 200, 255, cv2.THRESH_BINARY)
     
-    kernel = np.ones((5, 5), np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
     
     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     
-    if contours:
-        areas = [cv2.contourArea(c) for c in contours]
-        max_idx = np.argmax(areas)
-        contour = contours[max_idx]
-        
-        if cv2.contourArea(contour) > 100:
-            M = cv2.moments(contour)
-            if M["m00"] > 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                
-                (x, y), radius = cv2.minEnclosingCircle(contour)
-                
-                center_dist = np.sqrt((cx - frame_center[0])**2 + (cy - frame_center[1])**2)
-                max_dist = np.sqrt(frame_center[0]**2 + frame_center[1]**2)
-                
-                if center_dist < max_dist * 0.4:
-                    return cx, cy, int(radius)
+    if not contours:
+        return None
     
-    return frame_center[0], frame_center[1], 30
+    best_ellipse = None
+    best_score = float('inf')
+    
+    for cnt in contours:
+        if len(cnt) < 5:
+            continue
+        
+        area = cv2.contourArea(cnt)
+        if area < 50:
+            continue
+        
+        try:
+            ellipse = cv2.fitEllipse(cnt)
+        except:
+            continue
+        
+        (cx, cy), (a, b), angle = ellipse
+        
+        if a < min_axis or b < min_axis:
+            continue
+        if a > max_axis or b > max_axis:
+            continue
+        
+        aspect_ratio = min(a, b) / max(a, b)
+        if aspect_ratio < 0.4:
+            continue
+        
+        dist = np.sqrt((cx - frame_center[0])**2 + (cy - frame_center[1])**2)
+        area_score = abs(area - np.pi * a * b) / (np.pi * a * b)
+        
+        score = dist + area_score * 100
+        
+        if score < best_score:
+            best_score = score
+            best_ellipse = ellipse
+    
+    if best_ellipse is None:
+        return None
+    
+    (cx, cy), (a, b), angle = best_ellipse
+    
+    return int(cx), int(cy), int(a), int(b), angle
 
 
-def create_tracking_points(cx: int, cy: int, radius: int, num_points: int = 8) -> np.ndarray:
-    """Create tracking points around the pupil perimeter."""
+def detect_iris_circle(inverted: np.ndarray, frame_center: tuple[int, int],
+                       min_radius: int = 8, max_radius: int = 60) -> tuple[int, int, int] | None:
+    """
+    Fallback: Detect iris using contour moments (circle approximation).
+    Returns (cx, cy, radius) or None.
+    """
+    _, thresh = cv2.threshold(inverted, 200, 255, cv2.THRESH_BINARY)
+    
+    kernel = np.ones((3, 3), np.uint8)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+    
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return None
+    
+    best_contour = None
+    best_score = float('inf')
+    
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 50:
+            continue
+        
+        (x, y), radius = cv2.minEnclosingCircle(cnt)
+        
+        if radius < min_radius or radius > max_radius:
+            continue
+        
+        dist = np.sqrt((x - frame_center[0])**2 + (y - frame_center[1])**2)
+        
+        if dist < best_score:
+            best_score = dist
+            best_contour = cnt
+    
+    if best_contour is None:
+        return None
+    
+    M = cv2.moments(best_contour)
+    if M["m00"] > 0:
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        return cx, cy, int(radius)
+    
+    return None
+
+
+def create_tracking_points(cx: int, cy: int, a: int, b: int, angle: float, 
+                          num_points: int = 12) -> np.ndarray:
+    """
+    Create tracking points along elliptical perimeter.
+    Angle is in degrees, converted to radians for calculation.
+    """
     points = []
-    angle_step = 2 * np.pi / num_points
+    angle_rad = np.radians(angle)
     
     for i in range(num_points):
-        angle = i * angle_step
+        theta = 2 * np.pi * i / num_points
         
-        px = int(cx + radius * np.cos(angle))
-        py = int(cy + radius * np.sin(angle))
-        points.append([px, py])
+        cos_a = np.cos(angle_rad)
+        sin_a = np.sin(angle_rad)
+        cos_t = np.cos(theta)
+        sin_t = np.sin(theta)
         
-        px2 = int(cx + (radius * 0.6) * np.cos(angle))
-        py2 = int(cy + (radius * 0.6) * np.sin(angle))
-        points.append([px2, py2])
+        px = cx + a * cos_t * cos_a - b * sin_t * sin_a
+        py = cy + a * cos_t * sin_a + b * sin_t * cos_a
+        
+        points.append([int(px), int(py)])
+        
+        px2 = cx + (a * 0.6) * cos_t * cos_a - (b * 0.6) * sin_t * sin_a
+        py2 = cy + (a * 0.6) * cos_t * sin_a + (b * 0.6) * sin_t * cos_a
+        
+        points.append([int(px2), int(py2)])
     
     return np.array(points, dtype=np.float32).reshape(-1, 1, 2)
 
@@ -133,7 +214,7 @@ def track_with_optical_flow(
     valid_prev = prev_pts[status.ravel().astype(bool)]
     valid_next = next_pts[status.ravel().astype(bool)]
     
-    if len(valid_next) < 4:
+    if len(valid_next) < 5:
         return valid_prev.reshape(-1, 1, 2) if len(valid_prev) > 0 else None, None
     
     try:
@@ -153,103 +234,109 @@ def track_with_optical_flow(
             valid_next.reshape(-1, 1, 2) if len(valid_next) > 0 else None)
 
 
-def compute_center_from_points(tracked_pts: np.ndarray) -> tuple[int, int, int]:
-    """Compute pupil center and radius from tracked points."""
-    if tracked_pts is None or len(tracked_pts) < 3:
-        return 0, 0, 25
+def fit_ellipse_to_points(pts: np.ndarray) -> tuple[int, int, int, int, float]:
+    """
+    Fit ellipse to tracked points.
+    Returns (cx, cy, a, b, angle).
+    """
+    if pts is None or len(pts) < 5:
+        return 0, 0, 25, 25, 0
     
-    pts = tracked_pts.reshape(-1, 2)
+    pts = pts.reshape(-1, 2).astype(np.float64)
     
-    center_x = np.mean(pts[:, 0])
-    center_y = np.mean(pts[:, 1])
-    
-    distances = np.sqrt((pts[:, 0] - center_x)**2 + (pts[:, 1] - center_y)**2)
-    
-    inlier_mask = distances < np.percentile(distances, 75)
-    inlier_pts = pts[inlier_mask]
-    
-    if len(inlier_pts) >= 3:
-        center_x = np.mean(inlier_pts[:, 0])
-        center_y = np.mean(inlier_pts[:, 1])
-        radius = np.median(np.sqrt((inlier_pts[:, 0] - center_x)**2 + (inlier_pts[:, 1] - center_y)**2))
-    else:
-        radius = np.median(distances)
-    
-    return int(center_x), int(center_y), max(int(radius), 15)
+    try:
+        ellipse = cv2.fitEllipse(pts)
+        (cx, cy), (a, b), angle = ellipse
+        return int(cx), int(cy), int(a), int(b), angle
+    except:
+        center_x = np.mean(pts[:, 0])
+        center_y = np.mean(pts[:, 1])
+        return int(center_x), int(center_y), 25, 25, 0
 
 
-def smooth_positions(positions: list, radius: int = 5) -> list:
-    """Smooth positions using moving average."""
-    if len(positions) < radius * 2 + 1:
-        return positions
+def smooth_ellipses(ellipses: list, radius: int = 5) -> list:
+    """Smooth ellipse parameters using moving average."""
+    if len(ellipses) < radius * 2 + 1:
+        return ellipses
     
     smoothed = []
     half = radius
     
-    for i in range(len(positions)):
+    for i in range(len(ellipses)):
         start = max(0, i - half)
-        end = min(len(positions), i + half + 1)
-        window = positions[start:end]
+        end = min(len(ellipses), i + half + 1)
+        window = ellipses[start:end]
         
-        avg_x = np.mean([p[0] for p in window])
-        avg_y = np.mean([p[1] for p in window])
-        avg_r = np.mean([p[2] for p in window])
+        avg_cx = np.mean([e[0] for e in window])
+        avg_cy = np.mean([e[1] for e in window])
+        avg_a = np.mean([e[2] for e in window])
+        avg_b = np.mean([e[3] for e in window])
+        avg_angle = np.mean([e[4] for e in window])
         
-        smoothed.append((avg_x, avg_y, avg_r))
+        smoothed.append((avg_cx, avg_cy, avg_a, avg_b, avg_angle))
     
     return smoothed
 
 
-def draw_pupil_circle(
+def draw_eye_ellipse(
     frame: np.ndarray,
     cx: int,
     cy: int,
-    radius: int,
+    a: int,
+    b: int,
+    angle: float,
     color: tuple = (0, 255, 0),
     thickness: int = 2,
 ) -> np.ndarray:
-    """Draw circle around pupil."""
+    """Draw ellipse around eye."""
     output = frame.copy()
     h, w = frame.shape[:2]
     
     cx = int(cx)
     cy = int(cy)
-    radius = int(radius)
     
     if 0 <= cx < w and 0 <= cy < h:
-        cv2.circle(output, (cx, cy), radius, color, thickness)
+        box = ((cx, cy), (a * 2, b * 2), angle)
+        cv2.ellipse(output, box, color, thickness)
         
         cv2.circle(output, (cx, cy), 3, color, -1)
         
-        cv2.line(output, (cx - radius - 10, cy), (cx - radius - 3, cy), color, 1)
-        cv2.line(output, (cx + radius + 3, cy), (cx + radius + 10, cy), color, 1)
-        cv2.line(output, (cx, cy - radius - 10), (cx, cy - radius - 3), color, 1)
-        cv2.line(output, (cx, cy + radius + 3), (cx, cy + radius + 10), color, 1)
+        r = max(a, b) + 5
+        cv2.line(output, (cx - r, cy), (cx - r + 8, cy), color, 1)
+        cv2.line(output, (cx + r - 8, cy), (cx + r, cy), color, 1)
+        cv2.line(output, (cx, cy - r), (cx, cy - r + 8), color, 1)
+        cv2.line(output, (cx, cy + r - 8), (cx, cy + r), color, 1)
     
     return output
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Track pupil and draw circle overlay (Step 2).")
+    parser = argparse.ArgumentParser(description="Track eye with ellipse overlay (Step 2).")
     parser.add_argument("--input", "-i", type=Path, required=True, help="Input video path.")
     parser.add_argument("--output", "-o", type=Path, required=True, help="Output video path.")
     parser.add_argument(
         "--smooth-radius",
         type=int,
         default=5,
-        help="Smoothing radius for positions.",
+        help="Smoothing radius for ellipse parameters.",
     )
     parser.add_argument(
         "--num-points",
         type=int,
-        default=8,
-        help="Number of tracking points around pupil.",
+        default=12,
+        help="Number of tracking points around ellipse.",
     )
     parser.add_argument(
-        "--circle-radius",
+        "--min-axis",
         type=int,
-        default=25,
-        help="Base radius of circle to draw.",
+        default=8,
+        help="Minimum semi-axis length.",
+    )
+    parser.add_argument(
+        "--max-axis",
+        type=int,
+        default=60,
+        help="Maximum semi-axis length.",
     )
     parser.add_argument(
         "--max-frames",
@@ -284,7 +371,7 @@ def main() -> int:
     
     print(f"Processing {max_frames} frames at {w}x{h}...")
     
-    pupil_positions = []
+    ellipse_data = []
     prev_pts = None
     prev_gray = None
     first_frame = True
@@ -299,39 +386,66 @@ def main() -> int:
         gray, inverted = preprocess_for_eye_detection(frame)
         
         if first_frame:
-            cx, cy, radius = detect_eye_center(inverted, frame_center)
-            prev_pts = create_tracking_points(cx, cy, radius, args.num_points)
+            detected = detect_iris_ellipse(inverted, frame_center, 
+                                          min_axis=args.min_axis, max_axis=args.max_axis)
+            
+            if detected is None:
+                fallback = detect_iris_circle(inverted, frame_center)
+                if fallback:
+                    cx, cy, radius = fallback
+                    a, b, angle = radius, radius, 0.0
+                    print(f"Using circle fallback: center=({cx}, {cy}), radius={radius}")
+                else:
+                    cx, cy, a, b, angle = frame_center[0], frame_center[1], 25, 25, 0.0
+                    print("Using frame center as fallback")
+            else:
+                cx, cy, a, b, angle = detected
+            
+            prev_pts = create_tracking_points(cx, cy, a, b, angle, args.num_points)
             prev_gray = gray.copy()
             first_frame = False
             
-            pupil_positions.append((cx, cy, radius))
-            frame_with_circle = draw_pupil_circle(frame, cx, cy, args.circle_radius)
-            writer.write(frame_with_circle)
+            ellipse_data.append((cx, cy, a, b, angle))
+            frame_with_ellipse = draw_eye_ellipse(frame, cx, cy, a, b, angle)
+            writer.write(frame_with_ellipse)
             continue
         
         tracked_prev, tracked_curr = track_with_optical_flow(prev_gray, gray, prev_pts)
         
-        if tracked_curr is not None and len(tracked_curr) >= 3:
-            cx, cy, detected_radius = compute_center_from_points(tracked_curr.reshape(-1, 2))
-            prev_pts = create_tracking_points(cx, cy, detected_radius, args.num_points)
+        if tracked_curr is not None and len(tracked_curr) >= 5:
+            cx, cy, a, b, angle = fit_ellipse_to_points(tracked_curr.reshape(-1, 2))
+            prev_pts = create_tracking_points(cx, cy, a, b, angle, args.num_points)
         else:
-            cx, cy, detected_radius = detect_eye_center(inverted, frame_center)
-            prev_pts = create_tracking_points(cx, cy, detected_radius, args.num_points)
+            detected = detect_iris_ellipse(inverted, frame_center,
+                                           min_axis=args.min_axis, max_axis=args.max_axis)
+            if detected is not None:
+                cx, cy, a, b, angle = detected
+            else:
+                fallback = detect_iris_circle(inverted, frame_center)
+                if fallback:
+                    cx, cy, radius = fallback
+                    a, b, angle = radius, radius, 0.0
+                elif ellipse_data:
+                    cx, cy, a, b, angle = ellipse_data[-1]
+                else:
+                    cx, cy, a, b, angle = frame_center[0], frame_center[1], 25, 25, 0.0
+            
+            prev_pts = create_tracking_points(cx, cy, a, b, angle, args.num_points)
         
-        pupil_positions.append((cx, cy, detected_radius))
+        ellipse_data.append((cx, cy, a, b, angle))
         prev_gray = gray.copy()
         
-        frame_with_circle = draw_pupil_circle(frame, cx, cy, args.circle_radius)
-        writer.write(frame_with_circle)
+        frame_with_ellipse = draw_eye_ellipse(frame, cx, cy, a, b, angle)
+        writer.write(frame_with_ellipse)
 
     cap.release()
     writer.release()
     
-    if len(pupil_positions) > args.smooth_radius * 2:
-        print(f"\nSmoothing positions...")
-        smoothed = smooth_positions(pupil_positions, args.smooth_radius)
+    if len(ellipse_data) > args.smooth_radius * 2:
+        print(f"\nSmoothing {len(ellipse_data)} ellipse parameters...")
+        smoothed = smooth_ellipses(ellipse_data, args.smooth_radius)
         
-        print("Rewriting with smoothed positions...")
+        print("Rewriting with smoothed ellipses...")
         
         cap = cv2.VideoCapture(str(args.input))
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -342,14 +456,14 @@ def main() -> int:
             if not ok:
                 break
             
-            cx, cy, _ = smoothed[frame_idx]
-            frame_with_circle = draw_pupil_circle(frame, cx, cy, args.circle_radius)
-            writer.write(frame_with_circle)
+            cx, cy, a, b, angle = smoothed[frame_idx]
+            frame_with_ellipse = draw_eye_ellipse(frame, cx, cy, a, b, angle)
+            writer.write(frame_with_ellipse)
         
         cap.release()
         writer.release()
 
-    print(f"\nProcessed {len(pupil_positions)} frames.")
+    print(f"\nProcessed {len(ellipse_data)} frames.")
 
     import subprocess
     temp_output = str(args.output) + ".tmp.mp4"
