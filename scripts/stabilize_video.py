@@ -69,10 +69,14 @@ def compute_deltas(
     block_size: int = 3,
     lk_win: tuple[int, int] = (21, 21),
     lk_max_level: int = 3,
+    scale: float = 1.0,
 ) -> tuple[int, int, list[np.ndarray]]:
     """Returns (width, height, deltas) where deltas[k] is frame k -> k+1."""
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    orig_w, orig_h = w, h
+    if scale != 1.0:
+        w, h = int(w * scale), int(h * scale)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     ok, frame0 = cap.read()
@@ -106,6 +110,10 @@ def compute_deltas(
         if not ok:
             break
         _print_progress(len(deltas) + 1, progress_total, "  ")
+        
+        if scale != 1.0:
+            frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
+        
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
             prev_gray,
@@ -156,7 +164,12 @@ def compute_deltas(
             else:
                 prev_pts = p1
 
-    return w, h, deltas
+    # Scale deltas back to original resolution
+    if scale != 1.0 and deltas:
+        for i, d in enumerate(deltas):
+            deltas[i] = d / scale
+
+    return orig_w, orig_h, deltas
 
 
 def write_stabilized(
@@ -216,7 +229,17 @@ def main() -> int:
         default=None,
         help="Process only the first N frames (for quick tests).",
     )
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+        help="Scale factor for downscaling (0.5 = half size, 0.25 = 720p for 4K).",
+    )
     args = parser.parse_args()
+    
+    scale = args.scale
+    if scale != 1.0:
+        print(f"Scaling video by {scale}x")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
@@ -226,7 +249,7 @@ def main() -> int:
         return 1
 
     try:
-        w, h, deltas = compute_deltas(cap1, max_frames=args.max_frames)
+        w, h, deltas = compute_deltas(cap1, max_frames=args.max_frames, scale=scale)
     finally:
         cap1.release()
 
@@ -277,6 +300,12 @@ def main() -> int:
         writer.release()
 
     print(f"Wrote {args.output}")
+    
+    # Copy output to Google Drive if path contains 'drive'
+    output_str = str(args.output)
+    if '/content/drive' in output_str or '/drive/' in output_str:
+        print(f"Output saved to Google Drive: {args.output}")
+    
     return 0
 
 
