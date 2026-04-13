@@ -157,7 +157,8 @@ def detect_iris_circle(inverted: np.ndarray, frame_center: tuple[int, int],
     if M["m00"] > 0:
         cx = int(M["m10"] / M["m00"])
         cy = int(M["m01"] / M["m00"])
-        return cx, cy, int(radius)
+        (x, y), r = cv2.minEnclosingCircle(best_contour)
+        return cx, cy, int(r)
     
     return None
 
