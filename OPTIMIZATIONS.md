@@ -2,8 +2,8 @@
 
 ## Priority Order
 
-1. Downscale to 720p
-2. Add progress bar
+1. ~~Downscale to 720p~~ ✅
+2. ~~Add progress bar~~ ✅
 3. Crop to eye ROI
 4. Skip frames during stabilization
 5. Add checkpointing
@@ -15,13 +15,13 @@
 
 | Optimization | Impact | Effort | Status |
 |-------------|--------|--------|--------|
-| **Downscale to 720p** before processing | ~10x faster | Low | ⬜ |
+| ~~**Downscale to 720p** before processing~~ | ~10x faster | Low | ✅ Done |
 | Reduce `max_corners` (200→100) | 2x faster optical flow | Low | ⬜ |
 | Increase `lk_win` (21→31) | Fewer iterations, faster | Low | ⬜ |
 | Skip every 2nd frame for transform estimation | 2x faster | Low | ⬜ |
 | Use GPU-accelerated OpenCV | 2-5x faster | Medium | ⬜ |
 | Use `FFmpeg` for stabilization instead | Potentially faster | Medium | ⬜ |
-| Add progress bar | Better UX | Low | ⬜ |
+| ~~Add progress bar~~ | Better UX | Low | ✅ Done |
 
 ---
 
