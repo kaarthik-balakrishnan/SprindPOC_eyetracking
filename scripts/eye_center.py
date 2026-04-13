@@ -204,6 +204,10 @@ def draw_pupil_circle(
     output = frame.copy()
     h, w = frame.shape[:2]
     
+    cx = int(cx)
+    cy = int(cy)
+    radius = int(radius)
+    
     if 0 <= cx < w and 0 <= cy < h:
         cv2.circle(output, (cx, cy), radius, color, thickness)
         
