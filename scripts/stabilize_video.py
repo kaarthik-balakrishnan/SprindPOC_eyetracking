@@ -20,6 +20,19 @@ import cv2
 import numpy as np
 
 
+def _print_progress(current, total, prefix="Progress:", bar_length=40):
+    """Simple text-based progress bar."""
+    if total <= 0:
+        return
+    percent = current / total
+    filled = int(bar_length * percent)
+    bar = "=" * filled + "-" * (bar_length - filled)
+    sys.stdout.write(f"\r{prefix} [{bar}] {current}/{total} ({percent*100:.1f}%)")
+    sys.stdout.flush()
+    if current >= total:
+        sys.stdout.write("\n")
+
+
 def _affine_to_delta(M: np.ndarray) -> np.ndarray:
     """2x3 partial affine -> [dx, dy, da] where da is rotation in radians."""
     dx = float(M[0, 2])
@@ -60,6 +73,7 @@ def compute_deltas(
     """Returns (width, height, deltas) where deltas[k] is frame k -> k+1."""
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     ok, frame0 = cap.read()
     if not ok or frame0 is None:
@@ -81,6 +95,9 @@ def compute_deltas(
 
     deltas: list[np.ndarray] = []
     target_deltas = None if max_frames is None else max_frames - 1
+    progress_total = target_deltas if target_deltas else total_frames - 1
+    
+    print(f"Pass 1/2: Computing transforms ({progress_total} frames)...")
 
     while True:
         if target_deltas is not None and len(deltas) >= target_deltas:
@@ -88,6 +105,7 @@ def compute_deltas(
         ok, frame = cap.read()
         if not ok:
             break
+        _print_progress(len(deltas) + 1, progress_total, "  ")
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
             prev_gray,
@@ -157,12 +175,14 @@ def write_stabilized(
 
     fi = 0
     limit = len(diffs) if max_frames is None else min(len(diffs), max_frames)
+    print(f"Pass 2/2: Applying transforms to {limit} frames...")
     while True:
         ok, frame = cap.read()
         if not ok:
             break
         if fi >= limit:
             break
+        _print_progress(fi + 1, limit, "  ")
         T = _delta_to_affine(diffs[fi])
         stab = cv2.warpAffine(
             frame,
@@ -237,7 +257,7 @@ def main() -> int:
         cap2.release()
         return 1
 
-    fourcc = cv2.VideoWriter_fourcc(*"avc1")
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(args.output), fourcc, fps, (out_w, out_h))
     if not writer.isOpened():
         print(f"Failed to open writer: {args.output}", file=sys.stderr)
