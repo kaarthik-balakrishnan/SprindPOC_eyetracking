@@ -83,6 +83,9 @@ def compute_deltas(
     if not ok or frame0 is None:
         raise RuntimeError("Could not read first frame.")
 
+    if scale != 1.0:
+        frame0 = cv2.resize(frame0, (w, h), interpolation=cv2.INTER_AREA)
+
     prev_gray = cv2.cvtColor(frame0, cv2.COLOR_BGR2GRAY)
     prev_pts = cv2.goodFeaturesToTrack(
         prev_gray,
