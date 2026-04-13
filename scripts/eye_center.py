@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Step 2: Eye Tracking with User-Defined ROI
+Step 2: Eye Tracking with Template Matching
 
 - User clicks on first frame to select eye center
-- Bounding box/circle defines tracking region
-- Optical flow tracks points within ROI
-- Works reliably for fixed-camera setups
+- Creates template from first frame region
+- Tracks with optical flow
+- Periodically verifies with template matching to prevent drift
+- Re-syncs if optical flow and template match disagree
 
 Usage:
   python scripts/eye_center.py --input outputs/stabilized.mp4 \\
@@ -70,6 +71,58 @@ def select_eye_center(frame: np.ndarray, window_name: str = "Select Eye") -> tup
     
     cv2.destroyWindow(window_name)
     return None
+
+
+def create_template(gray_frame: np.ndarray, cx: int, cy: int, radius: int) -> np.ndarray:
+    """Create a template image of the eye region from the first frame."""
+    h, w = gray_frame.shape
+    
+    half = radius
+    x1 = max(0, cx - half)
+    x2 = min(w, cx + half)
+    y1 = max(0, cy - half)
+    y2 = min(h, cy + half)
+    
+    template = gray_frame[y1:y2, x1:x2].copy()
+    
+    return template
+
+
+def template_match(
+    gray_frame: np.ndarray,
+    template: np.ndarray,
+    search_cx: int,
+    search_cy: int,
+    search_radius: int,
+    threshold: float = 0.7
+) -> tuple[int, int, float] | None:
+    """
+    Find best match of template within search region.
+    Returns (best_cx, best_cy, similarity_score) or None if no good match.
+    """
+    h, w = gray_frame.shape
+    t_h, t_w = template.shape
+    
+    x1 = max(0, search_cx - search_radius)
+    x2 = min(w - t_w, search_cx + search_radius)
+    y1 = max(0, search_cy - search_radius)
+    y2 = min(h - t_h, search_cy + search_radius)
+    
+    if x2 <= x1 or y2 <= y1:
+        return None
+    
+    search_region = gray_frame[y1:y2, x1:x2]
+    
+    result = cv2.matchTemplate(search_region, template, cv2.TM_CCOEFF_NORMED)
+    _, max_val, _, max_loc = cv2.minMaxLoc(result)
+    
+    if max_val < threshold:
+        return None
+    
+    best_cx = x1 + max_loc[0] + t_w // 2
+    best_cy = y1 + max_loc[1] + t_h // 2
+    
+    return best_cx, best_cy, max_val
 
 
 def create_tracking_points_circle(cx: int, cy: int, radius: int, num_points: int = 16) -> np.ndarray:
@@ -147,6 +200,7 @@ def draw_tracking_overlay(
     radius: int,
     color: tuple = (0, 255, 0),
     thickness: int = 2,
+    template_matched: bool = False,
 ) -> np.ndarray:
     """Draw tracking circle and crosshairs."""
     output = frame.copy()
@@ -156,6 +210,7 @@ def draw_tracking_overlay(
     cy_i = int(cy)
     
     if 0 <= cx_i < w and 0 <= cy_i < h:
+        color = (0, 255, 0) if not template_matched else (0, 255, 255)
         cv2.circle(output, (cx_i, cy_i), radius, color, thickness)
         cv2.circle(output, (cx_i, cy_i), 3, color, -1)
         
@@ -164,12 +219,16 @@ def draw_tracking_overlay(
         cv2.line(output, (cx_i + r - 10, cy_i), (cx_i + r, cy_i), color, 1)
         cv2.line(output, (cx_i, cy_i - r), (cx_i, cy_i - r + 10), color, 1)
         cv2.line(output, (cx_i, cy_i + r - 10), (cx_i, cy_i + r), color, 1)
+        
+        if template_matched:
+            cv2.putText(output, "SYNC", (cx_i - 20, cy_i - radius - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
     
     return output
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Track eye with user-selected ROI (Step 2).")
+    parser = argparse.ArgumentParser(description="Track eye with template matching (Step 2).")
     parser.add_argument("--input", "-i", type=Path, required=True, help="Input video path.")
     parser.add_argument("--output", "-o", type=Path, required=True, help="Output video path.")
     parser.add_argument(
@@ -195,6 +254,24 @@ def main() -> int:
         type=int,
         default=None,
         help="Process only first N frames.",
+    )
+    parser.add_argument(
+        "--sync-interval",
+        type=int,
+        default=30,
+        help="Frames between template matching verification.",
+    )
+    parser.add_argument(
+        "--template-threshold",
+        type=float,
+        default=0.7,
+        help="Minimum template match score (0-1).",
+    )
+    parser.add_argument(
+        "--sync-threshold",
+        type=float,
+        default=30.0,
+        help="Max pixel distance before re-sync.",
     )
     parser.add_argument(
         "--save-center",
@@ -238,6 +315,13 @@ def main() -> int:
         with open(args.load_center) as f:
             cx, cy = map(int, f.read().strip().split(','))
         print(f"Loaded center from {args.load_center}: ({cx}, {cy})")
+        
+        ok, first_frame = cap.read()
+        if not ok:
+            print("Failed to read first frame", file=sys.stderr)
+            return 1
+        first_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+        template = create_template(first_gray, cx, cy, args.radius)
     else:
         print(f"Reading first frame to select eye center...")
         ok, first_frame = cap.read()
@@ -253,23 +337,24 @@ def main() -> int:
         cx, cy = center
         print(f"Selected eye center: ({cx}, {cy})")
         
+        first_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+        template = create_template(first_gray, cx, cy, args.radius)
+        
         if args.save_center:
             with open(args.save_center, 'w') as f:
                 f.write(f"{cx},{cy}")
             print(f"Saved center to {args.save_center}")
 
+    print(f"Template size: {template.shape}, mean intensity: {template.mean():.1f}")
+    
     prev_pts = create_tracking_points_circle(cx, cy, args.radius, args.num_points)
     print(f"Created {len(prev_pts)} tracking points at radius {args.radius}")
     
-    ok, prev_frame = cap.read()
-    if not ok:
-        print("Failed to read second frame", file=sys.stderr)
-        return 1
-    
-    prev_gray = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
+    prev_gray = first_gray.copy()
     
     center_data = [(cx, cy)]
-    frame_with_overlay = draw_tracking_overlay(prev_frame, cx, cy, args.radius)
+    synced = [True]
+    frame_with_overlay = draw_tracking_overlay(first_frame, cx, cy, args.radius, template_matched=True)
     writer.write(frame_with_overlay)
     
     print(f"Processing {max_frames - 1} remaining frames...")
@@ -285,19 +370,41 @@ def main() -> int:
         
         tracked_prev, tracked_curr = track_with_optical_flow(prev_gray, gray, prev_pts)
         
+        template_matched = False
+        
         if tracked_curr is not None and len(tracked_curr) >= 4:
             new_cx, new_cy = compute_center_from_points(tracked_curr)
             prev_pts = create_tracking_points_circle(int(new_cx), int(new_cy), args.radius, args.num_points)
-            cx, cy = new_cx, new_cy
         else:
-            if center_data:
-                cx, cy = center_data[-1]
-            prev_pts = create_tracking_points_circle(int(cx), int(cy), args.radius, args.num_points)
+            new_cx, new_cy = center_data[-1]
         
+        if frame_idx % args.sync_interval == 0:
+            match = template_match(
+                gray, template, int(new_cx), int(new_cy),
+                search_radius=args.radius * 2,
+                threshold=args.template_threshold
+            )
+            
+            if match:
+                tm_cx, tm_cy, score = match
+                dist = np.sqrt((new_cx - tm_cx)**2 + (new_cy - tm_cy)**2)
+                
+                if dist > args.sync_threshold:
+                    print(f"\n  Re-syncing at frame {frame_idx}: OF=({new_cx:.0f},{new_cy:.0f}), TM=({tm_cx},{tm_cy}), dist={dist:.1f}, score={score:.2f}")
+                    new_cx, new_cy = tm_cx, tm_cy
+                    template_matched = True
+                    prev_pts = create_tracking_points_circle(int(new_cx), int(new_cy), args.radius, args.num_points)
+                    template = create_template(gray, int(new_cx), int(new_cy), args.radius)
+                else:
+                    template_matched = True
+                    template = create_template(gray, int(new_cx), int(new_cy), args.radius)
+        
+        cx, cy = new_cx, new_cy
         center_data.append((cx, cy))
+        synced.append(template_matched)
         prev_gray = gray.copy()
         
-        frame_with_overlay = draw_tracking_overlay(frame, cx, cy, args.radius)
+        frame_with_overlay = draw_tracking_overlay(frame, cx, cy, args.radius, template_matched=synced[-1])
         writer.write(frame_with_overlay)
 
     cap.release()
@@ -330,13 +437,14 @@ def main() -> int:
                 break
             
             scx, scy = smoothed[frame_idx]
-            frame_with_overlay = draw_tracking_overlay(frame, scx, scy, args.radius)
+            frame_with_overlay = draw_tracking_overlay(frame, scx, scy, args.radius, template_matched=synced[frame_idx])
             writer.write(frame_with_overlay)
         
         cap.release()
         writer.release()
 
-    print(f"\nProcessed {len(center_data)} frames.")
+    sync_count = sum(synced)
+    print(f"\nProcessed {len(center_data)} frames, re-synced {sync_count} times.")
 
     return 0
 
