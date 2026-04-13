@@ -226,7 +226,24 @@ def main() -> int:
     writer.release()
 
     print(f"\nProcessed {frame_count} frames.")
-    print(f"Output: {args.output}")
+    print(f"Re-encoding with compression...")
+
+    import subprocess
+    temp_output = str(args.output) + ".tmp.mp4"
+    try:
+        subprocess.run([
+            'ffmpeg', '-y', '-i', str(args.output),
+            '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '128k',
+            temp_output
+        ], capture_output=True, check=True)
+        import shutil
+        shutil.move(temp_output, args.output)
+        print(f"Compressed and saved: {args.output}")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print(f"Output: {args.output} (uncompressed)")
+
     return 0
 
 

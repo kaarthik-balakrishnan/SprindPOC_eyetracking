@@ -289,6 +289,9 @@ def main() -> int:
         print(f"Failed to open writer: {args.output}", file=sys.stderr)
         cap2.release()
         return 1
+    
+    import tempfile
+    temp_output = str(args.output) + ".tmp.mp4"
 
     try:
         write_stabilized(
@@ -302,7 +305,23 @@ def main() -> int:
         cap2.release()
         writer.release()
 
-    print(f"Wrote {args.output}")
+    print(f"Re-encoding with compression...")
+
+    import subprocess
+    try:
+        subprocess.run([
+            'ffmpeg', '-y', '-i', str(args.output),
+            '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac', '-b:a', '128k',
+            temp_output
+        ], capture_output=True, check=True)
+        import shutil
+        shutil.move(temp_output, args.output)
+        print(f"Compressed and saved: {args.output}")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print(f"Warning: FFmpeg not available, using uncompressed output")
+        print(f"Wrote (uncompressed): {args.output}")
     
     # Copy output to Google Drive if path contains 'drive'
     output_str = str(args.output)
